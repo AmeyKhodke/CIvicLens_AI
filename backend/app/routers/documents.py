@@ -7,7 +7,10 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.models import User, Document, DocumentStatus
 from app.middleware.auth import get_current_user
-from app.schemas import DocumentOut, DocumentChatRequest, DocumentChatResponse
+from app.schemas import (
+    DocumentOut, DocumentChatRequest, DocumentChatResponse,
+    RAGEvaluationRequest, RAGEvaluationResponse
+)
 from app.services.document_service import save_and_extract_document
 from app.services.rag_service import index_document, ask_document_question, ask_global_document_question
 from app.services.summarization_service import _call_llm
@@ -33,15 +36,62 @@ async def process_document_background(db: Session, document_id: str, extracted_t
         bg_db.commit()
         logger.info(f"Document {document_id} ({doc.filename}): Starting processing...")
 
-        # 2. Generate Summary
-        logger.info(f"Document {document_id}: Generating AI summary...")
-        system_prompt = "You are an expert at summarizing complex governance documents. Provide a clear, structured executive summary."
-        user_prompt = f"Please provide a comprehensive executive summary of this document, highlighting key findings, decisions, action items, and recommendations:\n\n{extracted_text[:25000]}"
+        # 2. Generate Summary in the requested language
+        doc_lang = doc.language or "en"
+        from app.services.summarization_service import LANGUAGE_NAMES
+        lang_name = LANGUAGE_NAMES.get(doc_lang, "English")
+
+        logger.info(f"Document {document_id}: Generating AI summary in {lang_name}...")
+        
+        # Prepare text safely within LLM context budget (RAG will index the full text)
+        if len(extracted_text) > 8000:
+            doc_sample = extracted_text[:5000] + "\n\n[... content truncated for summary ...]\n\n" + extracted_text[-3000:]
+        else:
+            doc_sample = extracted_text
+
+        if doc_lang != "en":
+            system_prompt = f"You are an elite government executive analyst. Produce a concise, high-impact executive summary strictly in {lang_name}. Total length MUST be between 200 to 300 words maximum. Be direct, formal, and highlight only critical figures and decisions. Do not write excessive prose."
+            user_prompt = f"""Generate a crisp, concise EXECUTIVE SUMMARY of this governance document strictly in {lang_name} (max 250-300 words).
+                            Format exactly with these 4 clear sections in {lang_name}:
+                            ## 📌 Overview (विहंगावलोकन / सारांश)
+                            (2-3 concise sentences on document context, authority, and period)
+
+                            ## 🔍 Key Findings (मुख्य निरीक्षणे व मुद्दे)
+                            (3-4 bullet points of the most critical findings with key numbers)
+
+                            ## 💰 Financial Highlights (आर्थिक ठळक मुद्दे)
+                            (2-3 bullet points on budget, expenditure, or irregularities, if applicable)
+
+                            ## ⚡ Key Actions & Decisions (निर्णय व कृती)
+                            (2-3 concrete directives, required compliance actions, and next steps)
+
+                            DOCUMENT CONTENT:
+                            {doc_sample}"""
+        else:
+            system_prompt = "You are an elite government executive analyst. Produce a concise, high-impact executive summary. Total length MUST be between 200 to 300 words maximum. Be direct, formal, and highlight only critical figures and decisions. Do not write excessive prose."
+            user_prompt = f"""Generate a crisp, concise EXECUTIVE SUMMARY of this governance document (max 250-300 words).
+
+            Format exactly with these 4 clear sections:
+            ## 📌 Overview
+            (2-3 concise sentences on document context, issuing authority, and period)
+
+            ## 🔍 Key Findings
+            (3-4 bullet points of the most critical findings with key figures)
+
+            ## 💰 Financial Highlights
+            (2-3 bullet points on budget, expenditure, revenue, or irregularities)
+
+            ## ⚡ Key Actions & Decisions
+            (2-3 concrete directives, required compliance actions, and next steps)
+
+            DOCUMENT CONTENT:
+            {doc_sample}"""
+
         summary = await _call_llm(system_prompt, user_prompt)
         
         doc.summary = summary
         bg_db.commit()
-        logger.info(f"Document {document_id}: Summary generated ({len(summary)} chars)")
+        logger.info(f"Document {document_id}: Summary generated in {lang_name} ({len(summary)} chars)")
 
         # 3. Vectorize for RAG
         logger.info(f"Document {document_id}: Indexing for RAG...")
@@ -166,9 +216,107 @@ async def chat_with_document(
         answer_data = await ask_document_question(
             document_id=document_id,
             question=request.question,
-            language=request.language
+            language=request.language,
+            doc_obj=doc
         )
         return answer_data
     except Exception as e:
         logger.exception(f"Document chat failed for {document_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
+
+
+@router.delete("/{document_id}")
+async def delete_document(
+    document_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a document, its physical file, and its ChromaDB vector embeddings."""
+    from app.services.rag_service import delete_document_vectors
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # 1. Delete physical file from disk if present
+    if doc.file_path and os.path.exists(doc.file_path):
+        try:
+            os.remove(doc.file_path)
+            logger.info(f"Deleted physical file {doc.file_path}")
+        except Exception as e:
+            logger.warning(f"Failed to delete physical file {doc.file_path}: {e}")
+
+    # 2. Delete ChromaDB vector embeddings
+    await delete_document_vectors(document_id)
+
+    # 3. Delete from DB
+    db.delete(doc)
+    db.commit()
+    logger.info(f"Deleted document record {document_id} ({doc.filename})")
+
+    return {"message": "Document deleted successfully", "id": document_id}
+
+
+# ── RAGAS Evaluation Endpoints ──
+
+@router.post("/{document_id}/evaluate", response_model=RAGEvaluationResponse)
+async def evaluate_document_rag(
+    document_id: str,
+    request: Optional[RAGEvaluationRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Run RAGAS evaluation (Faithfulness, Answer Relevancy, Context Precision, Context Recall)
+    on the document's retrieval & generation pipeline.
+    """
+    from app.services.evaluation_service import run_ragas_evaluation
+
+    # RBAC check: Read-only leader cannot trigger re-evaluations
+    if current_user.role and current_user.role.value == "leader":
+        raise HTTPException(
+            status_code=403, 
+            detail="Public Leader role has read-only access. Only officers or administrators can trigger evaluations."
+        )
+
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if doc.status.value != "ready":
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Document is not ready for evaluation. Current status: {doc.status.value}"
+        )
+
+    custom_q = [q.model_dump() for q in request.custom_questions] if request and request.custom_questions else None
+    top_k = request.top_k if request and request.top_k else 4
+
+    try:
+        eval_result = await run_ragas_evaluation(
+            document_id=document_id,
+            db=db,
+            user_id=current_user.id,
+            custom_questions=custom_q,
+            top_k=top_k
+        )
+        return eval_result
+    except Exception as e:
+        logger.exception(f"RAGAS evaluation failed for {document_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Evaluation execution error: {str(e)}")
+
+
+@router.get("/{document_id}/evaluation", response_model=Optional[RAGEvaluationResponse])
+async def get_document_rag_evaluation(
+    document_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Fetch the latest cached RAGAS evaluation results for a document."""
+    from app.services.evaluation_service import get_latest_evaluation
+    
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    eval_result = get_latest_evaluation(document_id, db)
+    return eval_result

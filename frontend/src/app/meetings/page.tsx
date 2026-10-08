@@ -21,6 +21,7 @@ type CreateMode = 'type-select' | 'start-meeting' | 'upload-audio';
 
 export default function MeetingsPage() {
   const router = useRouter();
+  const [currentUser, setCurrentUser] = useState<any>(null);
   const [meetings, setMeetings] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -34,15 +35,39 @@ export default function MeetingsPage() {
     confidentiality: 'internal', language: 'en'
   });
 
+  const isReadOnly = currentUser?.role?.toLowerCase() === 'leader';
+
+  useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+    if (!token) {
+      router.push('/');
+      return;
+    }
+    api.getProfile().then(setCurrentUser).catch(() => {});
+  }, []);
+
   useEffect(() => { loadMeetings(); }, [searchQuery, statusFilter]);
 
   const loadMeetings = async () => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+    if (!token) {
+      router.push('/');
+      return;
+    }
     setLoading(true);
     try {
-      const results = await api.getMeetings({ search: searchQuery, status: statusFilter || undefined });
-      setMeetings(results);
-    } catch (e) { console.error(e); }
-    finally { setLoading(false); }
+      const results = await api.getMeetings({ search: searchQuery, status: statusFilter });
+      setMeetings(results || []);
+    } catch (e: any) { 
+      if (e?.status === 401) {
+        router.push('/');
+        return;
+      }
+      console.error('Failed to load meetings:', e);
+      setMeetings([]);
+    } finally { 
+      setLoading(false); 
+    }
   };
 
   const resetModal = () => {
@@ -94,9 +119,11 @@ export default function MeetingsPage() {
           <h1 style={{ fontSize: 22, fontWeight: 700, color: '#f1f5f9' }}>Meeting Intelligence</h1>
           <p style={{ color: '#94a3b8', fontSize: 13, marginTop: 2 }}>Transcribe, analyze, and summarize official consultations.</p>
         </div>
-        <button className="btn-primary" onClick={() => { setShowModal(true); setCreateMode('type-select'); }} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <Plus size={18} /> New Meeting
-        </button>
+        {!isReadOnly && (
+          <button className="btn-primary" onClick={() => { setShowModal(true); setCreateMode('type-select'); }} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Plus size={18} /> New Meeting
+          </button>
+        )}
       </div>
 
       {/* Filters */}

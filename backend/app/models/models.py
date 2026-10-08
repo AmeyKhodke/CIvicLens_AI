@@ -139,6 +139,8 @@ class Document(Base):
     status = Column(Enum(DocumentStatus), default=DocumentStatus.UPLOADED)
     summary = Column(Text, nullable=True)
     language = Column(String(50), default="en")
+    page_count = Column(Integer, nullable=True, default=1)
+    file_size = Column(Integer, nullable=True, default=0)
 
     # Foreign keys
     uploaded_by = Column(String, ForeignKey("users.id"), nullable=True)
@@ -227,3 +229,36 @@ class AuditLog(Base):
 
     # Relationships
     user = relationship("User", back_populates="audit_logs")
+
+
+class RAGEvaluation(Base):
+    __tablename__ = "rag_evaluations"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    document_id = Column(String, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    evaluated_by = Column(String, ForeignKey("users.id"), nullable=True)
+
+    status = Column(String(50), default="completed")  # running, completed, failed
+    faithfulness = Column(Float, default=0.0)
+    answer_relevancy = Column(Float, default=0.0)
+    context_precision = Column(Float, default=0.0)
+    context_recall = Column(Float, default=0.0)
+    overall_score = Column(Float, default=0.0)
+
+    total_questions = Column(Integer, default=0)
+    model_name = Column(String(100), default="Groq / LLaMA-3.3-70B")
+    embedding_model = Column(String(100), default="FastDense-384 / Semantic Hash")
+    top_k = Column(Integer, default=4)
+    avg_retrieval_time_ms = Column(Float, default=0.0)
+    avg_generation_time_ms = Column(Float, default=0.0)
+
+    # Full structured evaluation details stored as JSON string
+    details_json = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    document = relationship("Document", backref="evaluations")
+    evaluator = relationship("User")
+

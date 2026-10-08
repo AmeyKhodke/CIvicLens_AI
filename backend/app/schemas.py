@@ -25,6 +25,37 @@ class RegisterRequest(BaseModel):
     role: str = "secretary"
     contact: str = ""
 
+class ForgotPasswordRequest(BaseModel):
+    username_or_email: str
+
+class ResetPasswordRequest(BaseModel):
+    username_or_email: str
+    reset_code: str
+    new_password: str
+
+class AdminCreateUserRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    full_name: str
+    designation: str = ""
+    department: str = ""
+    role: str = "secretary"
+    contact: str = ""
+    is_active: bool = True
+
+class UserUpdateRequest(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+    designation: Optional[str] = None
+    department: Optional[str] = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+    contact: Optional[str] = None
+
+class AdminResetPasswordRequest(BaseModel):
+    new_password: str
+
 
 # ── User ──
 
@@ -33,10 +64,12 @@ class UserOut(BaseModel):
     username: str
     email: str
     full_name: str
-    designation: str
-    department: str
+    designation: str = ""
+    department: str = ""
     role: str
-    contact: str
+    contact: str = ""
+    is_active: bool = True
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -174,6 +207,8 @@ class DocumentOut(DocumentBase):
     filename: str
     file_type: str
     status: str
+    page_count: Optional[int] = 1
+    file_size: Optional[int] = 0
     summary: Optional[str] = None
     uploaded_by: Optional[str] = None
     created_at: datetime
@@ -210,6 +245,49 @@ class ChatResponse(BaseModel):
 class ExportRequest(BaseModel):
     format: str = "pdf"  # pdf, docx, json, text
     language: str = "en"
+
+
+# ── RAG Evaluation (RAGAS) ──
+
+class EvaluationQuestionItem(BaseModel):
+    question: str
+    ground_truth: Optional[str] = ""
+
+class RAGEvaluationRequest(BaseModel):
+    custom_questions: Optional[List[EvaluationQuestionItem]] = Field(default_factory=list)
+    top_k: Optional[int] = 4
+
+class RAGMetrics(BaseModel):
+    faithfulness: float
+    answer_relevancy: float
+    context_precision: float
+    context_recall: float
+
+class RAGEvaluationSample(BaseModel):
+    sample_index: int
+    question: str
+    ground_truth: Optional[str] = ""
+    generated_answer: str
+    retrieved_contexts: List[str]
+    retrieval_time_ms: Optional[float] = 0.0
+    generation_time_ms: Optional[float] = 0.0
+    metrics: RAGMetrics
+
+class RAGEvaluationResponse(BaseModel):
+    evaluation_id: Optional[str] = None
+    document_id: str
+    document_name: Optional[str] = "Document"
+    status: str
+    metrics: RAGMetrics
+    overall_score: float
+    total_questions: int
+    model_name: Optional[str] = "Groq / LLaMA-3.3-70B"
+    embedding_model: Optional[str] = "FastDense-384"
+    top_k: Optional[int] = 4
+    avg_retrieval_time_ms: Optional[float] = 0.0
+    avg_generation_time_ms: Optional[float] = 0.0
+    created_at: Optional[str] = None
+    results: List[RAGEvaluationSample] = Field(default_factory=list)
 
 
 # Fix forward references

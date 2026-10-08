@@ -40,33 +40,42 @@ async def save_and_extract_document(
     # 2. Save file
     file_path = os.path.join(settings.upload_dir, f"{db_doc.id}{ext}")
     content = await upload_file.read()
+    file_size = len(content)
     
     with open(file_path, "wb") as f:
         f.write(content)
         
     db_doc.file_path = file_path
     db_doc.file_type = file_type
+    db_doc.file_size = file_size
     db_doc.status = DocumentStatus.PROCESSING
     db.commit()
     
     try:
         # 3. Extract text
         extracted_text = ""
+        page_count = 1
         if file_type == "pdf":
             import pypdf
             pdf_reader = pypdf.PdfReader(io.BytesIO(content))
-            for page in pdf_reader.pages:
+            page_count = len(pdf_reader.pages)
+            for i, page in enumerate(pdf_reader.pages):
                 text = page.extract_text()
-                if text:
-                    extracted_text += text + "\n"
+                if text and text.strip():
+                    extracted_text += f"\n--- Page {i + 1} of {page_count} ---\n{text}\n"
         elif file_type == "txt":
             extracted_text = content.decode("utf-8", errors="ignore")
+            page_count = max(1, len(extracted_text.splitlines()) // 40)
         elif file_type == "docx":
             import docx
             doc = docx.Document(io.BytesIO(content))
-            extracted_text = "\n".join([p.text for p in doc.paragraphs])
+            extracted_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+            page_count = max(1, len(doc.paragraphs) // 10)
         else:
             raise ValueError(f"Unsupported file type: {ext}")
+            
+        db_doc.page_count = page_count
+        db.commit()
             
         # We don't store the full text in the DB to save space; 
         # it goes into ChromaDB.

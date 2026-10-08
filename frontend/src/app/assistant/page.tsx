@@ -1,7 +1,8 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
-import { Bot, Send, Sparkles, User, Loader2, BrainCircuit, FileSearch, MessageCircle } from 'lucide-react';
+import { Bot, Send, Sparkles, User, Loader2, BrainCircuit, FileSearch, MessageCircle, Trash2 } from 'lucide-react';
 import api from '@/lib/api';
+import FormattedMessage from '@/components/FormattedMessage';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -49,9 +50,38 @@ export default function AssistantPage() {
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Load chat history from localStorage on initial mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('civiclens_orchestrator_chat');
+      if (saved) {
+        setMessages(JSON.parse(saved));
+      }
+    } catch (e) {
+      console.error('Failed to load orchestrator chat history:', e);
+    }
+  }, []);
+
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  const updateMessagesAndStore = (newMsgs: Message[]) => {
+    setMessages(newMsgs);
+    try {
+      localStorage.setItem('civiclens_orchestrator_chat', JSON.stringify(newMsgs));
+    } catch (e) {
+      console.error('Failed to save orchestrator chat to localStorage:', e);
+    }
+  };
+
+  const handleClearChat = () => {
+    if (messages.length === 0) return;
+    if (confirm('Clear chat conversation history for the AI Assistant?')) {
+      setMessages([]);
+      localStorage.removeItem('civiclens_orchestrator_chat');
+    }
+  };
 
   const handleSend = async (question: string) => {
     const q = question || input;
@@ -59,14 +89,16 @@ export default function AssistantPage() {
     setInput('');
 
     const userMsg: Message = { role: 'user', content: q };
-    setMessages(prev => [...prev, userMsg]);
+    const updatedWithUser = [...messages, userMsg];
+    updateMessagesAndStore(updatedWithUser);
     setLoading(true);
 
     // Check for general conversational queries first
     const localAnswer = generalAnswer(q);
     if (localAnswer) {
       setTimeout(() => {
-        setMessages(prev => [...prev, { role: 'assistant', content: localAnswer, mode: 'general' }]);
+        const assistantMsg: Message = { role: 'assistant', content: localAnswer, mode: 'general' };
+        updateMessagesAndStore([...updatedWithUser, assistantMsg]);
         setLoading(false);
       }, 500);
       return;
@@ -75,18 +107,20 @@ export default function AssistantPage() {
     // Otherwise go to document RAG
     try {
       const res = await api.globalAssistantChat(q);
-      setMessages(prev => [...prev, {
+      const assistantMsg: Message = {
         role: 'assistant',
         content: res.answer,
         sources: res.sources,
         mode: 'document'
-      }]);
+      };
+      updateMessagesAndStore([...updatedWithUser, assistantMsg]);
     } catch (err: any) {
-      setMessages(prev => [...prev, {
+      const errorMsg: Message = {
         role: 'assistant',
         content: `I encountered an error: ${err.message}. Please ensure you have uploaded and processed some documents first.`,
         mode: 'general'
-      }]);
+      };
+      updateMessagesAndStore([...updatedWithUser, errorMsg]);
     } finally {
       setLoading(false);
     }
@@ -100,14 +134,28 @@ export default function AssistantPage() {
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#0a1628' }}>
       {/* Header */}
-      <div style={{ padding: '20px 32px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', gap: 14, background: 'rgba(11,29,53,0.4)' }}>
-        <div style={{ width: 42, height: 42, borderRadius: 12, background: 'rgba(212,168,67,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#f0d078' }}>
-          <Bot size={24} />
+      <div style={{ padding: '18px 32px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(11,29,53,0.4)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <div style={{ width: 42, height: 42, borderRadius: 12, background: 'rgba(212,168,67,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#f0d078' }}>
+            <Bot size={24} />
+          </div>
+          <div>
+            <h1 style={{ fontSize: 18, fontWeight: 700, color: '#f1f5f9', margin: 0 }}>CivicLens AI Assistant</h1>
+            <p style={{ color: '#64748b', fontSize: 12, margin: 0 }}>Powered by document intelligence & meeting analysis</p>
+          </div>
         </div>
-        <div>
-          <h1 style={{ fontSize: 18, fontWeight: 700, color: '#f1f5f9' }}>CivicLens AI Assistant</h1>
-          <p style={{ color: '#64748b', fontSize: 12 }}>Powered by document intelligence & meeting analysis</p>
-        </div>
+
+        {messages.length > 0 && (
+          <button
+            onClick={handleClearChat}
+            className="btn-secondary"
+            style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '6px 14px', color: '#94a3b8', borderColor: 'rgba(255,255,255,0.1)' }}
+            title="Clear Chat History"
+          >
+            <Trash2 size={13} />
+            Clear Chat
+          </button>
+        )}
       </div>
 
       {/* Chat body */}
@@ -137,50 +185,12 @@ export default function AssistantPage() {
         )}
 
         {messages.map((msg, idx) => (
-          <div key={idx} style={{ display: 'flex', gap: 12, alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', maxWidth: '80%', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
-            <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end' }}>
-              {msg.role === 'assistant' && (
-                <div style={{ width: 32, height: 32, borderRadius: 10, background: 'rgba(212,168,67,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#f0d078', flexShrink: 0 }}>
-                  <Bot size={18} />
-                </div>
-              )}
-              <div style={{
-                padding: '12px 18px', borderRadius: msg.role === 'user' ? '18px 18px 4px 18px' : '18px 18px 18px 4px',
-                background: msg.role === 'user' ? '#f0d078' : 'rgba(255,255,255,0.05)',
-                color: msg.role === 'user' ? '#0a1628' : '#e2e8f0',
-                fontSize: 14, lineHeight: 1.7, fontWeight: msg.role === 'user' ? 500 : 400,
-                border: msg.role === 'assistant' ? '1px solid rgba(255,255,255,0.08)' : 'none',
-                whiteSpace: 'pre-wrap'
-              }}>
-                {msg.content}
-              </div>
-              {msg.role === 'user' && (
-                <div style={{ width: 32, height: 32, borderRadius: 10, background: 'rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8', flexShrink: 0 }}>
-                  <User size={18} />
-                </div>
-              )}
-            </div>
-
-            {/* Source badges */}
-            {msg.sources && msg.sources.length > 0 && (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, paddingLeft: 44 }}>
-                {msg.sources.slice(0, 4).map((src, i) => (
-                  <span key={i} style={{ fontSize: 11, background: 'rgba(212,168,67,0.08)', color: '#d4a843', padding: '3px 10px', borderRadius: 20, display: 'flex', alignItems: 'center', gap: 5, border: '1px solid rgba(212,168,67,0.15)' }}>
-                    <FileSearch size={11} /> {src.filename || 'Document'}
-                  </span>
-                ))}
-                <span style={{ fontSize: 11, color: '#64748b', display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <BrainCircuit size={11} /> Based on indexed documents
-                </span>
-              </div>
-            )}
-            {msg.mode === 'general' && msg.role === 'assistant' && (
-              <div style={{ paddingLeft: 44 }}>
-                <span style={{ fontSize: 11, color: '#64748b', display: 'flex', alignItems: 'center', gap: 4 }}>
-                  <MessageCircle size={11} /> General response
-                </span>
-              </div>
-            )}
+          <div key={idx} style={{ display: 'flex', gap: 12, alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start', width: '100%', maxWidth: msg.role === 'user' ? '80%' : '860px', margin: msg.role === 'assistant' ? '0 auto' : undefined }}>
+            <FormattedMessage 
+              content={msg.content}
+              role={msg.role}
+              sources={msg.sources}
+            />
           </div>
         ))}
 

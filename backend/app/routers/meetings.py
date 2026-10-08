@@ -50,10 +50,10 @@ async def list_meetings(
     current_user: User = Depends(get_current_user)
 ):
     query = db.query(Meeting)
-    if status:
-        query = query.filter(Meeting.status == status)
-    if search:
-        query = query.filter(Meeting.title.ilike(f"%{search}%"))
+    if status and status.strip() and status.strip().lower() not in ("all", "undefined", "none", "null", ""):
+        query = query.filter(Meeting.status == status.strip())
+    if search and search.strip():
+        query = query.filter(Meeting.title.ilike(f"%{search.strip()}%"))
     query = query.order_by(Meeting.date.desc())
     meetings = query.offset(skip).limit(limit).all()
     return [_enrich_meeting(m) for m in meetings]

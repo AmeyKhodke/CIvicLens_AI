@@ -1,5 +1,12 @@
-"""FastAPI application entry point."""
 import os
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pypdf")
+try:
+    from cryptography.utils import CryptographyDeprecationWarning
+    warnings.filterwarnings("ignore", category=CryptographyDeprecationWarning)
+except ImportError:
+    pass
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
@@ -49,27 +56,75 @@ async def on_startup():
 
 
 def _create_default_user():
-    """Create a default admin user for first-time setup."""
+    """Create default system users for all RBAC roles on first-time setup."""
     from app.database import SessionLocal
     from app.models.models import User, UserRole
     from app.middleware.auth import hash_password
 
     db = SessionLocal()
     try:
-        existing = db.query(User).filter(User.username == "admin").first()
-        if not existing:
-            admin = User(
-                username="admin",
-                email="admin@gov.in",
-                hashed_password=hash_password("admin123"),
-                full_name="System Administrator",
-                designation="IT Administrator",
-                department="IT",
-                role=UserRole.LEADER,
-            )
-            db.add(admin)
-            db.commit()
-            print("✅ Default admin user created (username: admin, password: admin123)")
+        default_users = [
+            {
+                "username": "admin",
+                "email": "admin@gov.in",
+                "password": "admin123",
+                "full_name": "System Administrator",
+                "designation": "Chief IT Administrator",
+                "department": "Directorate of IT",
+                "role": UserRole.ADMIN,
+            },
+            {
+                "username": "depthead",
+                "email": "depthead@gov.in",
+                "password": "password123",
+                "full_name": "Dr. Rajesh Verma",
+                "designation": "Head of Department",
+                "department": "Public Works & Finance",
+                "role": UserRole.DEPT_HEAD,
+            },
+            {
+                "username": "secretary",
+                "email": "secretary@gov.in",
+                "password": "password123",
+                "full_name": "Ananya Deshmukh",
+                "designation": "Principal Secretary",
+                "department": "General Administration",
+                "role": UserRole.SECRETARY,
+            },
+            {
+                "username": "leader",
+                "email": "leader@gov.in",
+                "password": "password123",
+                "full_name": "Hon. Public Leader",
+                "designation": "State Representative / Minister",
+                "department": "Executive Council",
+                "role": UserRole.LEADER,
+            },
+        ]
+
+        for u in default_users:
+            existing = db.query(User).filter((User.username == u["username"]) | (User.email == u["email"])).first()
+            if not existing:
+                new_user = User(
+                    username=u["username"],
+                    email=u["email"],
+                    hashed_password=hash_password(u["password"]),
+                    full_name=u["full_name"],
+                    designation=u["designation"],
+                    department=u["department"],
+                    role=u["role"],
+                    is_active=True,
+                )
+                db.add(new_user)
+                db.commit()
+                print(f"✅ Created default user: {u['username']} ({u['role'].value})")
+            else:
+                # Ensure the existing admin has ADMIN role
+                if u["username"] == "admin" and existing.role != UserRole.ADMIN:
+                    existing.role = UserRole.ADMIN
+                    existing.hashed_password = hash_password(u["password"])
+                    db.commit()
+                    print("✅ Updated admin account role to ADMIN")
     finally:
         db.close()
 

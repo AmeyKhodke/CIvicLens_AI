@@ -49,11 +49,29 @@ class ApiClient {
       fetchOptions.body = body instanceof FormData ? body : JSON.stringify(body);
     }
 
-    const response = await fetch(url, fetchOptions);
+    let response: Response;
+    try {
+      response = await fetch(url, fetchOptions);
+    } catch (netErr: any) {
+      const errorObj: any = new Error(
+        `Unable to connect to backend at ${this.baseUrl}. Please ensure the backend server (FastAPI) is running.`
+      );
+      errorObj.status = 0;
+      errorObj.isNetworkError = true;
+      throw errorObj;
+    }
 
     if (!response.ok) {
+      if (response.status === 401 && endpoint !== '/auth/login') {
+        if (typeof window !== 'undefined') {
+          localStorage.removeItem('token');
+          window.dispatchEvent(new Event('auth-change'));
+        }
+      }
       const error = await response.json().catch(() => ({ detail: 'Request failed' }));
-      throw new Error(error.detail || `HTTP ${response.status}`);
+      const errorObj: any = new Error(error.detail || `HTTP ${response.status}`);
+      errorObj.status = response.status;
+      throw errorObj;
     }
 
     // Handle blob responses for file downloads
@@ -65,7 +83,7 @@ class ApiClient {
     return response.json();
   }
 
-  // ── Auth ──
+  // ── Auth & Users ──
   async login(username: string, password: string) {
     return this.request<{access_token: string; user: any}>('/auth/login', {
       method: 'POST',
@@ -73,13 +91,93 @@ class ApiClient {
     });
   }
 
+  async register(data: { username: string; email: string; password: string; full_name: string; designation?: string; department?: string; role?: string; contact?: string }) {
+    return this.request<any>('/auth/register', {
+      method: 'POST',
+      body: data,
+    });
+  }
+
+  async forgotPassword(username_or_email: string) {
+    return this.request<{ success: boolean; message: string; demo_reset_code?: string; username?: string }>('/auth/forgot-password', {
+      method: 'POST',
+      body: { username_or_email },
+    });
+  }
+
+  async resetPassword(data: { username_or_email: string; reset_code: string; new_password: string }) {
+    return this.request<{ success: boolean; message: string }>('/auth/reset-password', {
+      method: 'POST',
+      body: data,
+    });
+  }
+
   async getProfile() {
     return this.request<any>('/auth/me');
   }
 
+  async logout() {
+    try {
+      await this.request<any>('/auth/logout', { method: 'POST' });
+    } catch (e) {
+      // Ignore network errors on logout
+    } finally {
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('token');
+        window.dispatchEvent(new Event('auth-change'));
+      }
+    }
+  }
+
+  async getSessionInfo() {
+    return this.request<any>('/auth/session');
+  }
+
+  async getUsers(params?: { role?: string; search?: string }) {
+    const cleanParams: Record<string, string> = {};
+    if (params?.role && params.role !== 'all') cleanParams.role = params.role;
+    if (params?.search) cleanParams.search = params.search;
+    const query = new URLSearchParams(cleanParams).toString();
+    return this.request<any[]>(`/auth/users${query ? '?' + query : ''}`);
+  }
+
+  async createUser(data: any) {
+    return this.request<any>('/auth/users', {
+      method: 'POST',
+      body: data,
+    });
+  }
+
+  async updateUser(userId: string, data: any) {
+    return this.request<any>(`/auth/users/${userId}`, {
+      method: 'PUT',
+      body: data,
+    });
+  }
+
+  async adminResetPassword(userId: string, new_password: string) {
+    return this.request<any>(`/auth/users/${userId}/reset-password`, {
+      method: 'POST',
+      body: { new_password },
+    });
+  }
+
+  async deleteUser(userId: string) {
+    return this.request<any>(`/auth/users/${userId}`, {
+      method: 'DELETE',
+    });
+  }
+
   // ── Meetings ──
   async getMeetings(params?: { status?: string; search?: string }) {
-    const query = new URLSearchParams(params as any).toString();
+    const cleanParams: Record<string, string> = {};
+    if (params?.status && params.status.trim() && params.status !== 'all' && params.status !== 'undefined') {
+      cleanParams.status = params.status.trim();
+    }
+    if (params?.search && params.search.trim()) {
+      cleanParams.search = params.search.trim();
+    }
+    const query = new URLSearchParams(cleanParams).toString();
     return this.request<any[]>(`/meetings/${query ? '?' + query : ''}`);
   }
 
@@ -209,11 +307,27 @@ class ApiClient {
     });
   }
 
+  async deleteDocument(id: string) {
+    return this.request<any>(`/api/documents/${id}`, { method: 'DELETE' });
+  }
+
   async globalAssistantChat(question: string, language: string = 'en') {
     return this.request<any>('/api/documents/assistant/chat', {
       method: 'POST',
       body: { question, language },
     });
+  }
+
+  // ── RAG Evaluation (RAGAS) ──
+  async evaluateDocument(documentId: string, options?: { custom_questions?: any[]; top_k?: number }) {
+    return this.request<any>(`/api/documents/${documentId}/evaluate`, {
+      method: 'POST',
+      body: options || {},
+    });
+  }
+
+  async getDocumentEvaluation(documentId: string) {
+    return this.request<any>(`/api/documents/${documentId}/evaluation`);
   }
 
   // ── Export ──

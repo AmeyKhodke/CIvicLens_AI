@@ -2,18 +2,23 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import api from '@/lib/api';
+import { Trash2, Send, Loader2, Sparkles, MessageSquare } from 'lucide-react';
+import FormattedMessage from '@/components/FormattedMessage';
 
 export default function MeetingDetail() {
   const params = useParams();
   const router = useRouter();
   const meetingId = params.id as string;
 
+  const [currentUser, setCurrentUser] = useState<any>(null);
   const [meeting, setMeeting] = useState<any>(null);
   const [transcript, setTranscript] = useState<any[]>([]);
   const [summaries, setSummaries] = useState<any[]>([]);
   const [actions, setActions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'summary' | 'chat' | 'actions' | 'export'>('summary');
+
+  const isReadOnly = currentUser?.role?.toLowerCase() === 'leader';
 
   // Upload
   const [uploading, setUploading] = useState(false);
@@ -23,20 +28,70 @@ export default function MeetingDetail() {
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState<any[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
-
-  // Summary editing
-  const [editingSummary, setEditingSummary] = useState(false);
-  const [editedContent, setEditedContent] = useState('');
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Speaker mapping
   const [showSpeakerModal, setShowSpeakerModal] = useState(false);
   const [speakerMappings, setSpeakerMappings] = useState<Record<string, string>>({});
 
+  // Load chat messages from localStorage on mount / meetingId change
   useEffect(() => {
+    if (meetingId) {
+      try {
+        const saved = localStorage.getItem(`civiclens_meeting_chat_${meetingId}`);
+        if (saved) {
+          setChatMessages(JSON.parse(saved));
+        } else {
+          setChatMessages([]);
+        }
+      } catch (e) {
+        setChatMessages([]);
+      }
+    }
+  }, [meetingId]);
+
+  // Scroll chat into view on updates
+  useEffect(() => {
+    if (activeTab === 'chat') {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages, chatLoading, activeTab]);
+
+  const updateChatMessagesAndStore = (newMsgs: any[]) => {
+    setChatMessages(newMsgs);
+    if (meetingId) {
+      try {
+        localStorage.setItem(`civiclens_meeting_chat_${meetingId}`, JSON.stringify(newMsgs));
+      } catch (e) {
+        console.error('Failed to save meeting chat to localStorage:', e);
+      }
+    }
+  };
+
+  const handleClearChat = () => {
+    if (chatMessages.length === 0) return;
+    if (confirm('Clear chat conversation history for this meeting?')) {
+      setChatMessages([]);
+      localStorage.removeItem(`civiclens_meeting_chat_${meetingId}`);
+    }
+  };
+
+  useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+    if (!token) {
+      router.push('/');
+      return;
+    }
+    api.getProfile().then(setCurrentUser).catch(() => {});
     loadMeetingData();
   }, [meetingId]);
 
   const loadMeetingData = async () => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+    if (!token) {
+      router.push('/');
+      return;
+    }
     setLoading(true);
     try {
       const [meetingData, transcriptData, summaryData, actionData] = await Promise.all([
@@ -55,10 +110,15 @@ export default function MeetingDetail() {
       const existing: Record<string, string> = {};
       speakers.forEach((s: any) => { existing[s] = ''; });
       setSpeakerMappings(existing);
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      if (e?.status === 401) {
+        router.push('/');
+        return;
+      }
+      console.error('Failed to load meeting:', e);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -107,23 +167,31 @@ export default function MeetingDetail() {
     }
   };
 
-  const handleChat = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!chatInput.trim()) return;
-    const question = chatInput;
+  const handleChat = async (e?: React.FormEvent, customPrompt?: string) => {
+    if (e) e.preventDefault();
+    const query = customPrompt || chatInput;
+    if (!query.trim() || chatLoading) return;
+
     setChatInput('');
-    setChatMessages(prev => [...prev, { role: 'user', content: question }]);
+    const userMsg = { role: 'user', content: query };
+    const updatedWithUser = [...chatMessages, userMsg];
+    updateChatMessagesAndStore(updatedWithUser);
     setChatLoading(true);
 
     try {
-      const res = await api.chat(meetingId, question);
-      setChatMessages(prev => [...prev, {
-        role: 'assistant', content: res.answer, sources: res.sources
-      }]);
+      const res = await api.chat(meetingId, query);
+      const assistantMsg = {
+        role: 'assistant',
+        content: res.answer,
+        sources: res.sources
+      };
+      updateChatMessagesAndStore([...updatedWithUser, assistantMsg]);
     } catch (err: any) {
-      setChatMessages(prev => [...prev, { role: 'assistant', content: `Error: ${err.message}` }]);
+      const errorMsg = { role: 'assistant', content: `Error: ${err.message}` };
+      updateChatMessagesAndStore([...updatedWithUser, errorMsg]);
+    } finally {
+      setChatLoading(false);
     }
-    setChatLoading(false);
   };
 
   const handleSpeakerMap = async () => {
@@ -227,36 +295,38 @@ export default function MeetingDetail() {
         </div>
 
         {/* Action buttons */}
-        <div style={{ display: 'flex', gap: 8 }}>
-          {!meeting.audio_file_path && (
-            <>
-              <input ref={fileInputRef} type="file" accept="audio/*,video/*" onChange={handleFileUpload} style={{ display: 'none' }} />
-              <button className="btn-primary" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
-                {uploading ? '⏳ Uploading...' : '📁 Upload Audio/Video'}
+        {!isReadOnly && (
+          <div style={{ display: 'flex', gap: 8 }}>
+            {!meeting.audio_file_path && (
+              <>
+                <input ref={fileInputRef} type="file" accept="audio/*,video/*" onChange={handleFileUpload} style={{ display: 'none' }} />
+                <button className="btn-primary" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
+                  {uploading ? '⏳ Uploading...' : '📁 Upload Audio/Video'}
+                </button>
+              </>
+            )}
+            {meeting.status === 'uploaded' && (
+              <button className="btn-primary" onClick={handleTranscribe}>
+                🎙️ Transcribe
               </button>
-            </>
-          )}
-          {meeting.status === 'uploaded' && (
-            <button className="btn-primary" onClick={handleTranscribe}>
-              🎙️ Transcribe
-            </button>
-          )}
-          {(meeting.status === 'transcribed' || meeting.status === 'completed') && (
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button className="btn-primary" onClick={() => handleSummarize('detailed')}>
-                📝 Summarize
+            )}
+            {(meeting.status === 'transcribed' || meeting.status === 'completed') && (
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button className="btn-primary" onClick={() => handleSummarize('detailed')}>
+                  📝 Summarize
+                </button>
+                <button className="btn-secondary" onClick={() => handleSummarize('executive')}>
+                  📋 Executive
+                </button>
+              </div>
+            )}
+            {transcript.length > 0 && (
+              <button className="btn-secondary" onClick={() => setShowSpeakerModal(true)}>
+                👥 Map Speakers
               </button>
-              <button className="btn-secondary" onClick={() => handleSummarize('executive')}>
-                📋 Executive
-              </button>
-            </div>
-          )}
-          {transcript.length > 0 && (
-            <button className="btn-secondary" onClick={() => setShowSpeakerModal(true)}>
-              👥 Map Speakers
-            </button>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </header>
 
       {/* Processing indicator */}
@@ -357,106 +427,71 @@ export default function MeetingDetail() {
                       <span className={`badge badge-${currentSummary.summary_type}`}>
                         {currentSummary.summary_type} summary
                       </span>
-                      <button
-                        className="btn-secondary"
-                        onClick={() => { setEditingSummary(!editingSummary); setEditedContent(currentSummary.raw_text); }}
-                        style={{ fontSize: 12, padding: '6px 14px' }}
-                      >
-                        {editingSummary ? '✕ Cancel' : '✏️ Edit'}
-                      </button>
                     </div>
 
-                    {editingSummary ? (
-                      <div>
-                        <textarea
-                          className="input-field"
-                          value={editedContent}
-                          onChange={e => setEditedContent(e.target.value)}
-                          rows={20}
-                          style={{ fontFamily: 'monospace', fontSize: 13, resize: 'vertical' }}
-                        />
-                        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-                          <button className="btn-primary" onClick={async () => {
-                            await api.editSummary(meetingId, currentSummary.id, { raw_text: editedContent });
-                            setEditingSummary(false);
-                            loadMeetingData();
-                          }}>
-                            💾 Save
-                          </button>
-                          <button className="btn-primary" onClick={async () => {
-                            await api.editSummary(meetingId, currentSummary.id, { raw_text: editedContent, is_finalized: true });
-                            setEditingSummary(false);
-                            loadMeetingData();
-                          }}>
-                            ✅ Finalize
-                          </button>
+                    <div className="glass-card" style={{ padding: 24 }}>
+                      {/* Structured summary display */}
+                      {currentSummary.content?.agenda_items && (
+                        <div style={{ marginBottom: 20 }}>
+                          <h3 style={{ fontSize: 14, fontWeight: 600, color: '#d4a843', marginBottom: 10 }}>🗂 Agenda Items</h3>
+                          <ol style={{ paddingLeft: 20, fontSize: 13, color: '#e2e8f0', lineHeight: 1.8 }}>
+                            {currentSummary.content.agenda_items.map((item: string, i: number) => (
+                              <li key={i}>{item}</li>
+                            ))}
+                          </ol>
                         </div>
-                      </div>
-                    ) : (
-                      <div className="glass-card" style={{ padding: 24 }}>
-                        {/* Structured summary display */}
-                        {currentSummary.content?.agenda_items && (
-                          <div style={{ marginBottom: 20 }}>
-                            <h3 style={{ fontSize: 14, fontWeight: 600, color: '#d4a843', marginBottom: 10 }}>🗂 Agenda Items</h3>
-                            <ol style={{ paddingLeft: 20, fontSize: 13, color: '#e2e8f0', lineHeight: 1.8 }}>
-                              {currentSummary.content.agenda_items.map((item: string, i: number) => (
-                                <li key={i}>{item}</li>
-                              ))}
-                            </ol>
-                          </div>
-                        )}
+                      )}
 
-                        {currentSummary.content?.key_points && (
-                          <div style={{ marginBottom: 20 }}>
-                            <h3 style={{ fontSize: 14, fontWeight: 600, color: '#d4a843', marginBottom: 10 }}>📝 Key Points</h3>
-                            <ul style={{ paddingLeft: 20, fontSize: 13, color: '#e2e8f0', lineHeight: 1.8 }}>
-                              {currentSummary.content.key_points.map((point: string, i: number) => (
-                                <li key={i}>{point}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
+                      {currentSummary.content?.key_points && (
+                        <div style={{ marginBottom: 20 }}>
+                          <h3 style={{ fontSize: 14, fontWeight: 600, color: '#d4a843', marginBottom: 10 }}>📝 Key Points</h3>
+                          <ul style={{ paddingLeft: 20, fontSize: 13, color: '#e2e8f0', lineHeight: 1.8 }}>
+                            {currentSummary.content.key_points.map((point: string, i: number) => (
+                              <li key={i}>{point}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
 
-                        {currentSummary.content?.decisions && (
-                          <div style={{ marginBottom: 20 }}>
-                            <h3 style={{ fontSize: 14, fontWeight: 600, color: '#10b981', marginBottom: 10 }}>✅ Decisions</h3>
-                            <ul style={{ paddingLeft: 20, fontSize: 13, color: '#e2e8f0', lineHeight: 1.8 }}>
-                              {currentSummary.content.decisions.map((dec: string, i: number) => (
-                                <li key={i}>{dec}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
+                      {currentSummary.content?.decisions && (
+                        <div style={{ marginBottom: 20 }}>
+                          <h3 style={{ fontSize: 14, fontWeight: 600, color: '#10b981', marginBottom: 10 }}>✅ Decisions</h3>
+                          <ul style={{ paddingLeft: 20, fontSize: 13, color: '#e2e8f0', lineHeight: 1.8 }}>
+                            {currentSummary.content.decisions.map((dec: string, i: number) => (
+                              <li key={i}>{dec}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
 
-                        {currentSummary.content?.flagged_items?.length > 0 && (
-                          <div style={{ marginBottom: 20 }}>
-                            <h3 style={{ fontSize: 14, fontWeight: 600, color: '#f43f5e', marginBottom: 10 }}>⚠️ Flagged Items</h3>
-                            <ul style={{ paddingLeft: 20, fontSize: 13, color: '#fb7185', lineHeight: 1.8 }}>
-                              {currentSummary.content.flagged_items.map((item: string, i: number) => (
-                                <li key={i}>{item}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
+                      {currentSummary.content?.flagged_items?.length > 0 && (
+                        <div style={{ marginBottom: 20 }}>
+                          <h3 style={{ fontSize: 14, fontWeight: 600, color: '#f43f5e', marginBottom: 10 }}>⚠️ Flagged Items</h3>
+                          <ul style={{ paddingLeft: 20, fontSize: 13, color: '#fb7185', lineHeight: 1.8 }}>
+                            {currentSummary.content.flagged_items.map((item: string, i: number) => (
+                              <li key={i}>{item}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
 
-                        {currentSummary.content?.sentiment && (
-                          <div style={{
-                            display: 'flex', gap: 16, marginTop: 16, paddingTop: 16,
-                            borderTop: '1px solid rgba(255,255,255,0.06)', fontSize: 13,
-                          }}>
-                            <span>📊 Tone: <strong style={{ color: '#d4a843' }}>{currentSummary.content.sentiment}</strong></span>
-                            {currentSummary.is_finalized && <span style={{ color: '#10b981' }}>✅ Finalized</span>}
-                          </div>
-                        )}
+                      {currentSummary.content?.sentiment && (
+                        <div style={{
+                          display: 'flex', gap: 16, marginTop: 16, paddingTop: 16,
+                          borderTop: '1px solid rgba(255,255,255,0.06)', fontSize: 13,
+                        }}>
+                          <span>📊 Tone: <strong style={{ color: '#d4a843' }}>{currentSummary.content.sentiment}</strong></span>
+                          {currentSummary.is_finalized && <span style={{ color: '#10b981' }}>✅ Finalized</span>}
+                        </div>
+                      )}
 
-                        {/* Raw text fallback */}
-                        {!currentSummary.content?.key_points && currentSummary.raw_text && (
-                          <pre style={{ fontSize: 13, color: '#e2e8f0', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>
-                            {currentSummary.raw_text}
-                          </pre>
-                        )}
-                      </div>
-                    )}
+                      {/* Raw text fallback */}
+                      {!currentSummary.content?.key_points && currentSummary.raw_text && (
+                        <pre style={{ fontSize: 13, color: '#e2e8f0', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>
+                          {currentSummary.raw_text}
+                        </pre>
+                      )}
+                    </div>
                   </div>
                 ) : (
                   <div style={{ textAlign: 'center', padding: 40, color: '#64748b' }}>
@@ -475,12 +510,54 @@ export default function MeetingDetail() {
             {/* Chat Tab */}
             {activeTab === 'chat' && (
               <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 200px)' }}>
-                <div style={{ flex: 1, overflowY: 'auto', marginBottom: 16 }}>
+                {/* Chat Top Controls (Clear Chat button) */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, paddingBottom: 10, borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#f0d078', fontWeight: 600 }}>
+                    <MessageSquare size={16} />
+                    <span>Ask Meeting Intelligence</span>
+                  </div>
+                  {chatMessages.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleClearChat}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 5,
+                        padding: '4px 10px',
+                        borderRadius: 6,
+                        background: 'rgba(255,255,255,0.04)',
+                        border: '1px solid rgba(255,255,255,0.08)',
+                        color: '#94a3b8',
+                        fontSize: 11,
+                        cursor: 'pointer',
+                        transition: 'all 0.2s'
+                      }}
+                      title="Clear chat history for this meeting"
+                      onMouseEnter={(e) => { e.currentTarget.style.color = '#fb7185'; e.currentTarget.style.borderColor = 'rgba(244,63,94,0.3)'; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.color = '#94a3b8'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.08)'; }}
+                    >
+                      <Trash2 size={12} /> Clear Chat
+                    </button>
+                  )}
+                </div>
+
+                <div style={{ flex: 1, overflowY: 'auto', marginBottom: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
                   {chatMessages.length === 0 ? (
-                    <div style={{ textAlign: 'center', padding: 40, color: '#64748b' }}>
-                      <div style={{ fontSize: 48, marginBottom: 12 }}>💬</div>
-                      <p style={{ marginBottom: 8 }}>Ask anything about this meeting</p>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 360, margin: '20px auto' }}>
+                    <div style={{ textAlign: 'center', padding: '36px 16px', color: '#64748b' }}>
+                      <div style={{ 
+                        width: 52, height: 52, borderRadius: '50%', 
+                        background: 'rgba(212,168,67,0.1)', border: '1px solid rgba(212,168,67,0.2)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', 
+                        color: '#f0d078', margin: '0 auto 14px' 
+                      }}>
+                        <Sparkles size={26} />
+                      </div>
+                      <p style={{ fontSize: 15, fontWeight: 600, color: '#e2e8f0', marginBottom: 4 }}>Ask anything about this meeting</p>
+                      <p style={{ color: '#64748b', fontSize: 12.5, marginBottom: 20 }}>
+                        Grounded in speaker transcripts, key discussions, and recorded decisions.
+                      </p>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxWidth: 420, margin: '0 auto' }}>
                         {[
                           "What were the main decisions?",
                           "What did the PWD officer commit to?",
@@ -488,9 +565,10 @@ export default function MeetingDetail() {
                         ].map(q => (
                           <button
                             key={q}
+                            type="button"
                             className="btn-secondary"
-                            onClick={() => { setChatInput(q); }}
-                            style={{ fontSize: 13, textAlign: 'left' }}
+                            onClick={() => handleChat(undefined, q)}
+                            style={{ fontSize: 13, textAlign: 'left', padding: '10px 14px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.08)' }}
                           >
                             &quot;{q}&quot;
                           </button>
@@ -498,61 +576,67 @@ export default function MeetingDetail() {
                       </div>
                     </div>
                   ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                       {chatMessages.map((msg, i) => (
-                        <div key={i} style={{
-                          display: 'flex',
-                          justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                        }}>
-                          <div style={{
-                            maxWidth: '85%', padding: '12px 16px', borderRadius: 12,
-                            background: msg.role === 'user'
-                              ? 'linear-gradient(135deg, rgba(212,168,67,0.2), rgba(212,168,67,0.1))'
-                              : 'rgba(255,255,255,0.04)',
-                            border: msg.role === 'user'
-                              ? '1px solid rgba(212,168,67,0.2)'
-                              : '1px solid rgba(255,255,255,0.06)',
-                          }}>
-                            <p style={{ fontSize: 13, color: '#e2e8f0', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
-                              {msg.content}
-                            </p>
-                            {msg.sources?.length > 0 && (
-                              <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-                                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>Sources:</div>
-                                {msg.sources.map((src: any, j: number) => (
-                                  <div key={j} style={{
-                                    fontSize: 11, color: '#94a3b8', padding: '4px 8px', marginBottom: 2,
-                                    background: 'rgba(255,255,255,0.03)', borderRadius: 4,
-                                  }}>
-                                    <strong>{src.speaker}</strong> ({src.timestamp}): {src.text?.slice(0, 100)}...
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        </div>
+                        <FormattedMessage
+                          key={i}
+                          content={msg.content}
+                          role={msg.role}
+                          sources={msg.sources}
+                        />
                       ))}
                       {chatLoading && (
-                        <div style={{ display: 'flex', gap: 6, padding: 12 }}>
-                          <div className="skeleton" style={{ width: 8, height: 8, borderRadius: '50%' }} />
-                          <div className="skeleton" style={{ width: 8, height: 8, borderRadius: '50%' }} />
-                          <div className="skeleton" style={{ width: 8, height: 8, borderRadius: '50%' }} />
+                        <div style={{ 
+                          alignSelf: 'flex-start', 
+                          background: 'rgba(255, 255, 255, 0.03)', 
+                          border: '1px solid rgba(255, 255, 255, 0.07)',
+                          padding: '12px 16px', 
+                          borderRadius: 14, 
+                          display: 'flex', 
+                          gap: 10, 
+                          alignItems: 'center', 
+                          fontSize: 13, 
+                          color: '#f0d078' 
+                        }}>
+                          <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
+                          <span>Searching transcript & formulating response...</span>
                         </div>
                       )}
+                      <div ref={chatEndRef} />
                     </div>
                   )}
                 </div>
 
-                <form onSubmit={handleChat} style={{ display: 'flex', gap: 8 }}>
+                <form onSubmit={(e) => handleChat(e)} style={{ display: 'flex', gap: 8, position: 'relative' }}>
                   <input
                     className="input-field"
-                    placeholder="Ask about this meeting..."
+                    placeholder={transcript.length === 0 ? "Upload audio or generate transcript to chat..." : "Ask about this meeting..."}
                     value={chatInput}
                     onChange={e => setChatInput(e.target.value)}
                     disabled={chatLoading || transcript.length === 0}
+                    style={{ borderRadius: 12, height: 46, paddingRight: 50, background: 'rgba(255,255,255,0.04)', borderColor: 'rgba(255,255,255,0.1)' }}
                   />
-                  <button type="submit" className="btn-primary" disabled={chatLoading || !chatInput.trim()}>
-                    ➤
+                  <button 
+                    type="submit" 
+                    disabled={chatLoading || !chatInput.trim() || transcript.length === 0}
+                    style={{
+                      position: 'absolute',
+                      right: 6,
+                      top: 6,
+                      width: 34,
+                      height: 34,
+                      borderRadius: 8,
+                      background: chatInput.trim() && !chatLoading ? 'linear-gradient(135deg, #d4a843, #e4bc5a)' : '#1e293b',
+                      border: 'none',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: chatInput.trim() && !chatLoading ? 'pointer' : 'default',
+                      color: chatInput.trim() && !chatLoading ? '#0a1628' : '#64748b',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    <Send size={15} />
                   </button>
                 </form>
               </div>

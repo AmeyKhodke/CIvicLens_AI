@@ -103,7 +103,7 @@ async def generate_summary(
         date=meeting_date,
         venue=venue,
         attendees=attendees_str,
-        transcript=transcript[:15000],  # Limit transcript length
+        transcript=transcript[:8000],  # Limit transcript length
     )
 
     facts_response = await _call_llm(system_prompt_localized, facts_prompt)
@@ -129,7 +129,7 @@ async def generate_summary(
         exec_prompt = lang_instruction + EXECUTIVE_PROMPT.format(data=json.dumps(structured, indent=2))
         raw_text = await _call_llm(system_prompt_localized, exec_prompt)
     elif summary_type == "verbatim":
-        verbatim_prompt = lang_instruction + VERBATIM_PROMPT.format(transcript=transcript[:15000])
+        verbatim_prompt = lang_instruction + VERBATIM_PROMPT.format(transcript=transcript[:8000])
         verbatim_response = await _call_llm(system_prompt_localized, verbatim_prompt)
         try:
             verbatim_data = _parse_json(verbatim_response)
@@ -148,26 +148,39 @@ async def generate_summary(
     }
 
 
+import logging
+logger = logging.getLogger(__name__)
+
+
 async def _call_llm(system_prompt: str, user_prompt: str) -> str:
     """Call LLM with fallback chain: Ollama → Groq → OpenAI."""
+    errors = []
+
     # Try Ollama first (local)
     try:
         return await _call_ollama(system_prompt, user_prompt)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Ollama call skipped/failed: {e}")
+        errors.append(f"Ollama: {e}")
 
     # Fallback: Groq
     if settings.groq_api_key:
         try:
             return await _call_groq(system_prompt, user_prompt)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Groq LLM call failed: {e}")
+            errors.append(f"Groq: {e}")
 
     # Fallback: OpenAI
     if settings.openai_api_key:
-        return await _call_openai(system_prompt, user_prompt)
+        try:
+            return await _call_openai(system_prompt, user_prompt)
+        except Exception as e:
+            logger.warning(f"OpenAI LLM call failed: {e}")
+            errors.append(f"OpenAI: {e}")
 
-    raise RuntimeError("No LLM available. Run Ollama or provide API keys.")
+    err_summary = "; ".join(errors) if errors else "No API keys configured"
+    raise RuntimeError(f"No LLM available. ({err_summary})")
 
 
 async def _call_ollama(system_prompt: str, user_prompt: str) -> str:
@@ -190,22 +203,51 @@ async def _call_ollama(system_prompt: str, user_prompt: str) -> str:
 
 async def _call_groq(system_prompt: str, user_prompt: str) -> str:
     import httpx
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(
+    import asyncio
+
+    # Safe prompt length budget for Groq request
+    trimmed_prompt = user_prompt if len(user_prompt) <= 9000 else (user_prompt[:5000] + "\n\n[...]\n\n" + user_prompt[-3500:])
+    candidate_models = [settings.groq_model, "openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"]
+    # Remove duplicates while preserving order
+    models_to_try = [m for m in candidate_models if m]
+
+    async def _post_request(client, prompt_text: str, max_tokens: int, model: str):
+        return await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {settings.groq_api_key}"},
             json={
-                "model": settings.groq_model,
+                "model": model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": prompt_text},
                 ],
                 "temperature": 0.3,
-                "max_tokens": 4000,
+                "max_tokens": max_tokens,
             }
         )
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+
+    last_error = None
+    async with httpx.AsyncClient(timeout=120) as client:
+        for model in models_to_try:
+            try:
+                response = await _post_request(client, trimmed_prompt, max_tokens=2048, model=model)
+                
+                # Handle 413 or 429 Rate Limit with backoff
+                if response.status_code == 429:
+                    logger.warning(f"Groq 429 rate limit on {model}. Waiting 2s before retry...")
+                    await asyncio.sleep(2.0)
+                    fallback_prompt = trimmed_prompt[:3500]
+                    response = await _post_request(client, fallback_prompt, max_tokens=1000, model=model)
+
+                if response.status_code == 200:
+                    return response.json()["choices"][0]["message"]["content"]
+                
+                last_error = f"Groq HTTP {response.status_code} ({model}): {response.text[:100]}"
+            except Exception as e:
+                last_error = str(e)
+                continue
+
+    raise RuntimeError(last_error or "Groq calls failed on all candidate models")
 
 
 async def _call_openai(system_prompt: str, user_prompt: str) -> str:

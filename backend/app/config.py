@@ -28,11 +28,12 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
     groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "qwen/qwen3.8-27b"
 
-    # ── Bhashini ──
+    # ── Bhashini & Sarvam (Indic Languages) ──
     bhashini_api_key: str = ""
     bhashini_user_id: str = ""
+    sarvam_api_key: str = ""
 
     # ── ChromaDB ──
     chroma_persist_dir: str = "./chroma_data"
